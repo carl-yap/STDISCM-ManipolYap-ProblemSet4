@@ -1,3 +1,0 @@
-C:/Users/Carl/Documents/lozol/STDISCM/Problem Set 4/ManipolYap_ProblemSet4/out/build/x64-debug/CMakeFiles/ManipolYap_ProblemSet4.dir
-C:/Users/Carl/Documents/lozol/STDISCM/Problem Set 4/ManipolYap_ProblemSet4/out/build/x64-debug/CMakeFiles/edit_cache.dir
-C:/Users/Carl/Documents/lozol/STDISCM/Problem Set 4/ManipolYap_ProblemSet4/out/build/x64-debug/CMakeFiles/rebuild_cache.dir
