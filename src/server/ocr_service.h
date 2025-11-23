@@ -16,5 +16,33 @@ public:
 	OCRService(int n_threads = 4);
 	~OCRService();
 
+	grpc::Status ProcessImage(
+		grpc::ServerContext* context,
+		const ocrservice::OCRRequest* request,
+		ocrservice::OCRResponse* response) override;
 
+	grpc::Status ProcessImageStream(
+		grpc::ServerContext* context,
+		grpc::ServerReaderWriter<ocrservice::OCRResponse, 
+								 ocrservice::OCRRequest>* stream) override;
+
+private:
+	struct Task {
+		ocrservice::OCRRequest request;
+		ocrservice::OCRResponse* response;
+		std::mutex* response_mutex;
+		std::condition_variable* cv;
+		bool* done;
+	};
+
+	void workerThread();
+	void processTask(const Task& task);
+
+	std::vector<std::thread> workers;
+	std::queue<Task> task_queue;
+	std::mutex queue_mutex;
+	std::condition_variable queue_cv;
+	bool shutdown;
+
+	std::vector<std::unique_ptr<OCRProcessor>> processors;
 };

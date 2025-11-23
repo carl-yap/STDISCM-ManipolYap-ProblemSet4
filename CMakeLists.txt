@@ -26,22 +26,55 @@ find_package(Protobuf REQUIRED)
 find_package(gRPC REQUIRED)
 find_package(Tesseract REQUIRED)
 
-set(PROTO_FILES proto/ocr_service.proto)
+# Set protobuf variables for compatibility
+set(PROTOBUF_PROTOC_EXECUTABLE $<TARGET_FILE:protobuf::protoc>)
+
+# Generate gRPC code
+set(PROTO_FILES "${CMAKE_CURRENT_SOURCE_DIR}/proto/ocr_service.proto")
 set(PROTO_PATH "${CMAKE_CURRENT_SOURCE_DIR}/proto")
 
-add_library(ocr_grpc_proto ${PROTO_FILES})
+# Get generated file names
+set(PROTO_SRCS "${CMAKE_CURRENT_BINARY_DIR}/ocr_service.pb.cc")
+set(PROTO_HDRS "${CMAKE_CURRENT_BINARY_DIR}/ocr_service.pb.h")
+set(GRPC_SRCS "${CMAKE_CURRENT_BINARY_DIR}/ocr_service.grpc.pb.cc")
+set(GRPC_HDRS "${CMAKE_CURRENT_BINARY_DIR}/ocr_service.grpc.pb.h")
+
+# Find protoc and grpc_cpp_plugin
+find_program(PROTOC_EXECUTABLE protoc REQUIRED)
+find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+
+# Custom command to generate protobuf and gRPC files
+add_custom_command(
+    OUTPUT ${PROTO_SRCS} ${PROTO_HDRS} ${GRPC_SRCS} ${GRPC_HDRS}
+    COMMAND ${PROTOC_EXECUTABLE}
+    ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+         --grpc_out=${CMAKE_CURRENT_BINARY_DIR}
+         -I${PROTO_PATH}
+         --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
+         ${PROTO_FILES}
+    DEPENDS ${PROTO_FILES}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Generating protobuf and gRPC files from ${PROTO_FILES}"
+    VERBATIM
+)
+
+# Create a custom target to ensure generation happens first
+add_custom_target(generate_proto_files DEPENDS ${PROTO_SRCS} ${PROTO_HDRS} ${GRPC_SRCS} ${GRPC_HDRS})
+
+# Create library with generated files
+add_library(ocr_grpc_proto STATIC ${PROTO_SRCS} ${PROTO_HDRS} ${GRPC_SRCS} ${GRPC_HDRS})
+add_dependencies(ocr_grpc_proto generate_proto_files)
 target_link_libraries(ocr_grpc_proto
     PUBLIC
         protobuf::libprotobuf
         gRPC::grpc++
+        gRPC::grpc++_reflection
 )
 target_include_directories(ocr_grpc_proto PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 
-get_target_property(grpc_cpp_plugin_location gRPC::grpc_cpp_plugin LOCATION)
-protobuf_generate(TARGET ocr_grpc_proto LANGUAGE cpp)
-protobuf_generate(TARGET ocr_grpc_proto LANGUAGE grpc 
-    GENERATE_EXTENSIONS .grpc.pb.h .grpc.pb.cc
-    PLUGIN "protoc-gen-grpc=${grpc_cpp_plugin_location}")
+# Mark generated files
+set_source_files_properties(${PROTO_SRCS} ${PROTO_HDRS} ${GRPC_SRCS} ${GRPC_HDRS} 
+    PROPERTIES GENERATED TRUE)
 
 # Server's exec
 add_executable (ps4_server
@@ -53,7 +86,6 @@ add_executable (ps4_server
 )
 target_link_libraries(ps4_server PRIVATE 
 	ocr_grpc_proto
-    Qt6::Core
     tesseract55
     leptonica-1.85.0
     gRPC::grpc++
