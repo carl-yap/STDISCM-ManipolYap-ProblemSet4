@@ -2,7 +2,7 @@
 # project specific logic here.
 #
 cmake_minimum_required (VERSION 3.16)
-
+set(CMAKE_TOOLCHAIN_FILE "C:/tools/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
 # Enable Hot Reload for MSVC compilers if supported.
 if (POLICY CMP0141)
   cmake_policy(SET CMP0141 NEW)
@@ -98,6 +98,8 @@ target_include_directories(ps4_server PRIVATE
 # Client's exec
 add_executable(ps4_client
     src/client/main.cpp
+    src/client/mainwindow.h
+    src/client/mainwindow.cpp
 )
 target_link_libraries(ps4_client PRIVATE 
 	ocr_grpc_proto
