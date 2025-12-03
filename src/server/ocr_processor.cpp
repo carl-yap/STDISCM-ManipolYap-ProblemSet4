@@ -5,7 +5,7 @@
 OCRProcessor::OCRProcessor() {
 	tess_api = std::make_unique<tesseract::TessBaseAPI>();
 	// Initialize Tesseract with English language
-	if (!initializeTesseract("eng")) {
+	if (!initializeTesseract("eng_fast")) {
 		std::cerr << "Failed to initialize Tesseract!" << std::endl;
 	}
 }
