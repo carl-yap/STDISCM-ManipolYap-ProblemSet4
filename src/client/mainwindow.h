@@ -7,6 +7,17 @@
 #include <QTextEdit>
 #include <QLabel>
 #include <QVBoxLayout>
+#include <QListWidget>
+#include <QThread>
+#include <QMutex>
+#include <QWaitCondition>
+#include <atomic>
+#include <memory>
+
+#include "ocr_service.grpc.pb.h"
+#include <grpcpp/grpcpp.h>
+
+class OCRClientWorker;
 
 class MainWindow : public QMainWindow
 {
@@ -19,9 +30,23 @@ public:
 private slots:
     void onUploadClicked();
     void onClearClicked();
+    void onOCRResultReady(int requestId, const QString& text, bool success, const QString& error);
+    void onProgressUpdated();
 
 private:
     void setupUI();
+    void processNextImage();
+    void startNewBatch();
+    QWidget* createThumbnailWidget(const QString& fileName, const QString& status, const QString& ocrText = "");
+    void updateThumbnailWithResult(int index, const QString& status, const QString& ocrText);
+
+    struct ImageTask {
+        int requestId;
+        QString filePath;
+        QImage image;
+        bool completed;
+        QString result;
+    };
 
     QWidget* centralWidget;
     QVBoxLayout* mainLayout;
@@ -30,6 +55,38 @@ private:
     QProgressBar* progressBar;
     QTextEdit* resultsDisplay;
     QLabel* statusLabel;
+    QListWidget* fileListWidget;
+
+    std::unique_ptr<ocrservice::OCRService::Stub> stub_;
+    std::shared_ptr<grpc::Channel> channel_;
+
+    QList<ImageTask> currentBatch_;
+    std::atomic<int> completedCount_;
+    std::atomic<int> nextRequestId_;
+    int totalInCurrentBatch_;
+
+    QMutex batchMutex_;
+    QThread* workerThread_;
+    OCRClientWorker* worker_;
+};
+
+class OCRClientWorker : public QObject
+{
+    Q_OBJECT
+
+public:
+    OCRClientWorker(std::shared_ptr<grpc::Channel> channel);
+    ~OCRClientWorker();
+
+public slots:
+    void processImage(int requestId, const QImage& image, const QString& filePath);
+
+signals:
+    void resultReady(int requestId, const QString& text, bool success, const QString& error);
+
+private:
+    std::unique_ptr<ocrservice::OCRService::Stub> stub_;
+    std::atomic<bool> shutdown_;
 };
 
 #endif // MAINWINDOW_H

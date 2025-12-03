@@ -4,6 +4,10 @@
 
 OCRProcessor::OCRProcessor() {
 	tess_api = std::make_unique<tesseract::TessBaseAPI>();
+	// Initialize Tesseract with English language
+	if (!initializeTesseract("eng")) {
+		std::cerr << "Failed to initialize Tesseract!" << std::endl;
+	}
 }
 
 OCRProcessor::~OCRProcessor() {
@@ -25,14 +29,14 @@ OCRProcessor::Result OCRProcessor::processImage(const std::vector<unsigned char>
 
 	Result result;
 	result.success = false;
-	
+
 	Pix* image = pixReadMem(image_data.data(), static_cast<size_t>(image_data.size()));
 	if (!image) {
 		result.error_msg = "Failed to read image from memory.";
 		return result;
 	}
 
-	// preprocess and inference
+	// Preprocess and inference
 	image = pixConvertTo8(image, false);
 	image = pixOpenGray(image, 3, 3);
 	image = pixCloseGray(image, 3, 3);

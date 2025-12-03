@@ -23,5 +23,5 @@ private:
 	std::unique_ptr<tesseract::TessBaseAPI> tess_api;
 	std::mutex mutex;
 
-	bool initializeTesseract(const std::string& lang = "eng_fast");
+	bool initializeTesseract(const std::string& lang = "eng");
 };
