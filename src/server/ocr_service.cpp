@@ -33,6 +33,9 @@ OCRService::~OCRService() {
 }
 
 void OCRService::workerThread(int thread_id) {
+    constexpr int kMaxRetries = 3;
+    constexpr int kRetryDelayMs = 200;
+
     std::cout << "[Server] Worker thread " << thread_id << " started." << std::endl;
 
     while (true) {
@@ -58,28 +61,48 @@ void OCRService::workerThread(int thread_id) {
             }
         }
 
-        // Process the image
+        TaskResult task_result;
+        bool success = false;
+        std::string error_message;
+        std::string text;
+        int attempt = 0;
         auto start_time = std::chrono::high_resolution_clock::now();
 
-        std::cout << "[Server] Thread " << thread_id << " processing image..." << std::endl;
-        auto result = processors_[thread_id]->processImage(task.image_data);
+        while (attempt < kMaxRetries) {
+            std::cout << "[Server] Thread " << thread_id << " processing image (attempt " << (attempt + 1) << ")..." << std::endl;
+            auto result = processors_[thread_id]->processImage(task.image_data);
+
+            if (result.success) {
+                success = true;
+                text = result.text;
+                error_message = result.error_msg;
+                break;
+            }
+            else {
+                error_message = result.error_msg;
+                std::cout << "[Server] Thread " << thread_id << " processing failed: " << error_message << std::endl;
+                if (attempt < kMaxRetries - 1) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kRetryDelayMs));
+                }
+            }
+            ++attempt;
+        }
 
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
         std::cout << "[Server] Thread " << thread_id
             << " completed in " << duration.count() << "ms. "
-            << "Success: " << (result.success ? "Yes" : "No")
-            << ", Text length: " << result.text.length() << std::endl;
+            << "Success: " << (success ? "Yes" : "No")
+            << ", Text length: " << text.length() << std::endl;
 
         // Store the result
         {
             std::lock_guard<std::mutex> lock(results_mutex_);
-            TaskResult task_result;
             task_result.request_id = task.request_id;
-            task_result.text = result.text;
-            task_result.success = result.success;
-            task_result.error_message = result.error_msg;
+            task_result.text = text;
+            task_result.success = success;
+            task_result.error_message = error_message;
             task_result.completed = true;
 
             results_[task.request_id] = task_result;
