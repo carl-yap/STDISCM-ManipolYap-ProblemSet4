@@ -21,11 +21,6 @@ public:
         const ocrservice::OCRRequest* request,
         ocrservice::OCRResponse* response) override;
 
-    grpc::Status ProcessImageStream(
-        grpc::ServerContext* context,
-        grpc::ServerReaderWriter<ocrservice::OCRResponse,
-        ocrservice::OCRRequest>* stream) override;
-
 private:
     struct ImageTask {
         int request_id;

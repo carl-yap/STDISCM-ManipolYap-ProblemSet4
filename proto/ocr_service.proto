@@ -4,7 +4,6 @@ package ocrservice;
 
 service OCRService {
   rpc ProcessImage(OCRRequest) returns (OCRResponse);
-  rpc ProcessImageStream(stream OCRRequest) returns (stream OCRResponse);
 }
 
 message OCRRequest {

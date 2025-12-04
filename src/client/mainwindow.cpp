@@ -93,7 +93,7 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), completedCount_(0), nextRequestId_(1), totalInCurrentBatch_(0)
 {
     // Setup gRPC channel
-    channel_ = grpc::CreateChannel("localhost:50051", grpc::InsecureChannelCredentials());
+    channel_ = grpc::CreateChannel("10.98.53.240:50051", grpc::InsecureChannelCredentials());
     stub_ = ocrservice::OCRService::NewStub(channel_);
 
     // Setup worker thread
