@@ -23,16 +23,16 @@ public:
 
 	grpc::Status ProcessImageStream(
 		grpc::ServerContext* context,
-		grpc::ServerReaderWriter<ocrservice::OCRResponse, 
-								 ocrservice::OCRRequest>* stream) override;
+		grpc::ServerReaderWriter<ocrservice::OCRResponse,
+		ocrservice::OCRRequest>* stream) override;
 
 private:
 	struct Task {
 		ocrservice::OCRRequest request;
 		ocrservice::OCRResponse* response;
-		std::mutex* response_mutex;
-		std::condition_variable* cv;
-		bool* done;
+		std::shared_ptr<std::mutex> response_mutex;  // Changed to shared_ptr
+		std::shared_ptr<std::condition_variable> cv;  // Changed to shared_ptr
+		std::shared_ptr<bool> done;  // Changed to shared_ptr
 	};
 
 	void workerThread();

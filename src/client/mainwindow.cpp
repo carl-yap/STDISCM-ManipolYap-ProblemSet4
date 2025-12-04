@@ -22,36 +22,68 @@ OCRClientWorker::~OCRClientWorker() {
 void OCRClientWorker::processImage(int requestId, const QImage& image, const QString& filePath) {
     if (shutdown_) return;
 
+    qDebug() << "[Client] Processing image. Request ID:" << requestId
+        << "File:" << filePath
+        << "Image size:" << image.size();
+
     try {
         // Convert QImage to byte array
         QByteArray imageBytes;
         QBuffer buffer(&imageBytes);
         buffer.open(QIODevice::WriteOnly);
-        image.save(&buffer, "PNG");
+        bool saved = image.save(&buffer, "PNG");
 
-        // Prepare gRPC request
+        if (!saved) {
+            qDebug() << "[Client] Failed to convert image to PNG format";
+            emit resultReady(requestId, "", false, "Failed to convert image to PNG");
+            return;
+        }
+
+        qDebug() << "[Client] Image converted to PNG. Size:" << imageBytes.size() << "bytes";
+
+        // Prepare gRPC request - request_id is int32
         ocrservice::OCRRequest request;
-        request.set_request_id(requestId);
         request.set_image_data(imageBytes.constData(), imageBytes.size());
+        request.set_request_id(requestId);  // This is correct - int32
+
+        // DEBUG: Log before sending
+        qDebug() << "[Client] Sending gRPC request. Request ID:" << request.request_id()
+            << "Image data size:" << request.image_data().size() << "bytes";
 
         // Send request
         grpc::ClientContext context;
         ocrservice::OCRResponse response;
 
+        auto start_time = std::chrono::high_resolution_clock::now();
         grpc::Status status = stub_->ProcessImage(&context, request, &response);
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+        qDebug() << "[Client] Received response in" << duration.count() << "ms";
+        qDebug() << "[Client] Response request_id:" << response.request_id();
+        qDebug() << "[Client] Response success:" << response.success();
+        qDebug() << "[Client] Response text length:" << response.text().length();
+        qDebug() << "[Client] Response error:" << QString::fromStdString(response.error_message());
 
         if (status.ok()) {
+            qDebug() << "[Client] Request" << requestId << "successful. "
+                << "Text length:" << response.text().length()
+                << "Success:" << response.success();
+
             emit resultReady(requestId,
                 QString::fromStdString(response.text()),
                 response.success(),
                 QString::fromStdString(response.error_message()));
         }
         else {
+            qDebug() << "[Client] gRPC error for request" << requestId
+                << ":" << QString::fromStdString(status.error_message());
             emit resultReady(requestId, "", false,
                 QString("gRPC error: %1").arg(status.error_message().c_str()));
         }
     }
     catch (const std::exception& e) {
+        qDebug() << "[Client] Exception for request" << requestId << ":" << e.what();
         emit resultReady(requestId, "", false, QString("Exception: %1").arg(e.what()));
     }
 }
@@ -105,11 +137,10 @@ void MainWindow::setupUI()
 
     // Setup list widget for better thumbnail display
     fileListWidget->setViewMode(QListWidget::IconMode);
-    fileListWidget->setIconSize(QSize(140, 140));
+    fileListWidget->setIconSize(QSize(120, 120));
     fileListWidget->setResizeMode(QListWidget::Adjust);
     fileListWidget->setSpacing(10);
     fileListWidget->setMovement(QListWidget::Static);
-    fileListWidget->setUniformItemSizes(false);
 
     // Add to layout
     mainLayout->addWidget(statusLabel);
@@ -129,63 +160,31 @@ void MainWindow::setupUI()
     resize(800, 600);
 }
 
-QWidget* MainWindow::createThumbnailWidget(const QString& fileName, const QString& status, const QString& ocrText)
+QWidget* MainWindow::createThumbnailWidget(const QImage& image, const QString& fileName, const QString& status)
 {
     QWidget* widget = new QWidget();
     QVBoxLayout* layout = new QVBoxLayout(widget);
     layout->setContentsMargins(5, 5, 5, 5);
 
-    // Create thumbnail - either OCR text preview or placeholder
-    QLabel* thumbnailLabel = new QLabel();
-    thumbnailLabel->setFixedSize(120, 120);
-    thumbnailLabel->setAlignment(Qt::AlignCenter);
-    thumbnailLabel->setWordWrap(true);
-    thumbnailLabel->setStyleSheet(
-        "QLabel { "
-        "background-color: white; "
-        "border: 2px solid #cccccc; "
-        "border-radius: 5px; "
-        "padding: 5px; "
-        "font-size: 9px; "
-        "}"
-    );
+    // Create thumbnail
+    QLabel* imageLabel = new QLabel();
+    QPixmap pixmap = QPixmap::fromImage(image.scaled(100, 100, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    imageLabel->setPixmap(pixmap);
+    imageLabel->setAlignment(Qt::AlignCenter);
 
-    if (ocrText.isEmpty()) {
-        // Show processing placeholder
-        thumbnailLabel->setText("Processing...");
-        thumbnailLabel->setStyleSheet(
-            "QLabel { "
-            "background-color: #f0f0f0; "
-            "border: 2px solid #cccccc; "
-            "border-radius: 5px; "
-            "color: #666666; "
-            "font-size: 10px; "
-            "}"
-        );
-    }
-    else {
-        // Show OCR text preview (first 150 characters)
-        QString preview = ocrText.left(150);
-        if (ocrText.length() > 150) {
-            preview += "...";
-        }
-        thumbnailLabel->setText(preview);
-    }
+    // Create text label
+    QLabel* textLabel = new QLabel(QString("%1\n%2").arg(fileName).arg(status));
+    textLabel->setAlignment(Qt::AlignCenter);
+    textLabel->setWordWrap(true);
+    textLabel->setMaximumWidth(120);
 
-    // Create info label with filename and status
-    QLabel* infoLabel = new QLabel(QString("<b>%1</b><br>%2").arg(fileName).arg(status));
-    infoLabel->setAlignment(Qt::AlignCenter);
-    infoLabel->setWordWrap(true);
-    infoLabel->setMaximumWidth(140);
-    infoLabel->setStyleSheet("font-size: 9px;");
-
-    layout->addWidget(thumbnailLabel);
-    layout->addWidget(infoLabel);
+    layout->addWidget(imageLabel);
+    layout->addWidget(textLabel);
 
     return widget;
 }
 
-void MainWindow::updateThumbnailWithResult(int index, const QString& status, const QString& ocrText)
+void MainWindow::updateThumbnailStatus(int index, const QString& status)
 {
     if (index >= 0 && index < fileListWidget->count()) {
         QListWidgetItem* item = fileListWidget->item(index);
@@ -193,8 +192,12 @@ void MainWindow::updateThumbnailWithResult(int index, const QString& status, con
             QMutexLocker locker(&batchMutex_);
             if (index < currentBatch_.size()) {
                 QString fileName = QFileInfo(currentBatch_[index].filePath).fileName();
-                QWidget* widget = createThumbnailWidget(fileName, status, ocrText);
-                item->setSizeHint(QSize(160, 180));
+                QWidget* widget = createThumbnailWidget(
+                    currentBatch_[index].image,
+                    fileName,
+                    status
+                );
+                item->setSizeHint(QSize(140, 160));
                 fileListWidget->setItemWidget(item, widget);
             }
         }
@@ -210,6 +213,8 @@ void MainWindow::onUploadClicked()
         "Image Files (*.png *.jpg *.jpeg *.bmp)"
     );
 
+    qDebug() << "[Client] Selected" << files.size() << "files";
+
     if (!files.isEmpty()) {
         // Check if we need to start a new batch
         if (progressBar->value() == 100 || totalInCurrentBatch_ == 0) {
@@ -221,11 +226,14 @@ void MainWindow::onUploadClicked()
             QImage image(filePath);
             if (!image.isNull()) {
                 ImageTask task;
-                task.requestId = nextRequestId_++;
+                task.requestId = nextRequestId_;
                 task.filePath = filePath;
                 task.image = image;
                 task.completed = false;
                 task.result = "Processing...";
+
+                qDebug() << "[Client] Creating task for file:" << filePath
+                    << "Request ID:" << task.requestId;
 
                 QMutexLocker locker(&batchMutex_);
                 currentBatch_.append(task);
@@ -233,25 +241,33 @@ void MainWindow::onUploadClicked()
 
                 // Add thumbnail to list widget
                 QListWidgetItem* item = new QListWidgetItem();
-                item->setSizeHint(QSize(160, 180));
+                item->setSizeHint(QSize(140, 160));
                 fileListWidget->addItem(item);
 
-                // Create and set thumbnail widget (initially with no OCR text)
+                // Create and set thumbnail widget
                 QString fileName = QFileInfo(filePath).fileName();
-                QWidget* widget = createThumbnailWidget(fileName, "Processing...", "");
+                QWidget* widget = createThumbnailWidget(image, fileName, "Processing...");
                 fileListWidget->setItemWidget(item, widget);
 
                 // Start processing this image
+                qDebug() << "[Client] Invoking worker for request ID:" << task.requestId;
                 QMetaObject::invokeMethod(worker_, "processImage",
                     Qt::QueuedConnection,
                     Q_ARG(int, task.requestId),
                     Q_ARG(QImage, image),
                     Q_ARG(QString, filePath));
+
+                nextRequestId_++;
+            }
+            else {
+                qDebug() << "[Client] Failed to load image:" << filePath;
             }
         }
 
         statusLabel->setText(QString("Processing %1 images in current batch").arg(totalInCurrentBatch_));
         progressBar->setValue(0);
+
+        qDebug() << "[Client] Current batch size:" << totalInCurrentBatch_;
     }
 }
 
@@ -270,6 +286,9 @@ void MainWindow::onClearClicked()
 
 void MainWindow::onOCRResultReady(int requestId, const QString& text, bool success, const QString& error)
 {
+    qDebug() << "[Client] Received result for Request ID:" << requestId
+        << "Success:" << success;
+
     QMutexLocker locker(&batchMutex_);
 
     // Find the task and update it
@@ -279,19 +298,20 @@ void MainWindow::onOCRResultReady(int requestId, const QString& text, bool succe
             currentBatch_[i].result = success ? text : ("Error: " + error);
             completedCount_++;
 
-            // Update thumbnail with OCR result
+            // Update thumbnail status
             QString status = success ? "✓ Completed" : "✗ Failed";
-            QString displayText = success ? text : "";
-            updateThumbnailWithResult(i, status, displayText);
+            updateThumbnailStatus(i, status);
 
             // Update results display immediately
             QString resultEntry = QString("\n=== Image: %1 ===\n")
                 .arg(QFileInfo(currentBatch_[i].filePath).fileName());
             if (success) {
                 resultEntry += text + "\n";
+                qDebug() << "[Client] OCR Text extracted:" << text.left(50) << "...";
             }
             else {
                 resultEntry += "ERROR: " + error + "\n";
+                qDebug() << "[Client] OCR Error:" << error;
             }
 
             resultsDisplay->append(resultEntry);

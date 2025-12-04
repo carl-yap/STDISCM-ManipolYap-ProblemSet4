@@ -37,8 +37,8 @@ private:
     void setupUI();
     void processNextImage();
     void startNewBatch();
-    QWidget* createThumbnailWidget(const QString& fileName, const QString& status, const QString& ocrText = "");
-    void updateThumbnailWithResult(int index, const QString& status, const QString& ocrText);
+    QWidget* createThumbnailWidget(const QImage& image, const QString& fileName, const QString& status);
+    void updateThumbnailStatus(int index, const QString& status);
 
     struct ImageTask {
         int requestId;
