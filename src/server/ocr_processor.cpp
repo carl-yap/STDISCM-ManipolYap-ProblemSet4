@@ -63,7 +63,7 @@ OCRProcessor::Result OCRProcessor::processImage(const std::vector<unsigned char>
 		result.success = true;
 		std::cout << "[OCRProcessor] OCR SUCCESS! Extracted " << result.text.length() << " characters" << std::endl;
 		std::cout << "[OCRProcessor] Text preview: \"" << result.text.substr(0, std::min<size_t>(100, result.text.length())) << "\"" << std::endl;
-		delete[] text;
+		//delete[] text;
 	}
 	else {
 		result.error_msg = "Tesseract failed to extract text.";

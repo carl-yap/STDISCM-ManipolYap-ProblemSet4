@@ -1,15 +1,17 @@
 #include "ocr_service.h"
 #include <iostream>
 #include <chrono>
+#include <thread>
 
-OCRService::OCRService(int n_threads) : shutdown(false) {
-    // make one processor per thread
+OCRService::OCRService(int n_threads) : shutdown_(false) {
+    // Create one processor per thread
     for (int i = 0; i < n_threads; ++i) {
-        processors.emplace_back(std::make_unique<OCRProcessor>());
+        processors_.emplace_back(std::make_unique<OCRProcessor>());
     }
 
+    // Start worker threads
     for (int i = 0; i < n_threads; ++i) {
-        workers.emplace_back(&OCRService::workerThread, this);
+        workers_.emplace_back(&OCRService::workerThread, this, i);
     }
 
     std::cout << "OCRService started with " << n_threads << " threads." << std::endl;
@@ -17,12 +19,12 @@ OCRService::OCRService(int n_threads) : shutdown(false) {
 
 OCRService::~OCRService() {
     {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        shutdown = true;
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        shutdown_ = true;
     }
-    queue_cv.notify_all();
+    queue_cv_.notify_all();
 
-    for (auto& worker : workers) {
+    for (auto& worker : workers_) {
         if (worker.joinable()) {
             worker.join();
         }
@@ -30,102 +32,67 @@ OCRService::~OCRService() {
     std::cout << "OCRService shut down." << std::endl;
 }
 
-void OCRService::workerThread() {
-    size_t thread_id = 0;
-    { // assign unique thread ID
-        static std::mutex id_mutex;
-        static size_t next_id = 0;
-        std::lock_guard<std::mutex> lock(id_mutex);
-        thread_id = next_id++;
-    }
-
-    std::cout << "Worker thread " << thread_id << " started." << std::endl;
+void OCRService::workerThread(int thread_id) {
+    std::cout << "[Server] Worker thread " << thread_id << " started." << std::endl;
 
     while (true) {
-        Task task;
+        ImageTask task;
         {
-            // wait for task
-            std::unique_lock<std::mutex> lock(queue_mutex);
-            queue_cv.wait(lock, [this]() { return !task_queue.empty() || shutdown; });
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait(lock, [this]() { return !task_queue_.empty() || shutdown_; });
 
-            if (shutdown && task_queue.empty()) { break; }
+            if (shutdown_ && task_queue_.empty()) {
+                break;
+            }
 
-            if (!task_queue.empty()) { // get task from queue
-                task = std::move(task_queue.front());
-                task_queue.pop();
+            if (!task_queue_.empty()) {
+                task = std::move(task_queue_.front());
+                task_queue_.pop();
 
-                // DEBUG: Log received task
                 std::cout << "[Server] Thread " << thread_id
-                    << " received task. Request ID: " << task.request.request_id()
-                    << ", Image size: " << task.request.image_data().size() << " bytes"
-                    << std::endl;
+                    << " received task. Request ID: " << task.request_id
+                    << ", Image size: " << task.image_data.size() << " bytes" << std::endl;
             }
             else {
                 continue;
             }
         }
 
-        // DEBUG: Start timing
+        // Process the image
         auto start_time = std::chrono::high_resolution_clock::now();
 
-        // process task
-        std::vector<unsigned char> image_data(
-            task.request.image_data().begin(),
-            task.request.image_data().end());
+        std::cout << "[Server] Thread " << thread_id << " processing image..." << std::endl;
+        auto result = processors_[thread_id]->processImage(task.image_data);
 
-        // DEBUG: Log before processing
-        std::cout << "[Server] Thread " << thread_id
-            << " processing image. Size: " << image_data.size() << " bytes"
-            << std::endl;
-
-        auto result = processors[thread_id]->processImage(image_data);
-
-        // DEBUG: End timing and log results
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
         std::cout << "[Server] Thread " << thread_id
             << " completed in " << duration.count() << "ms. "
             << "Success: " << (result.success ? "Yes" : "No")
-            << ", Text length: " << result.text.length()
-            << ", Error: " << result.error_msg
-            << std::endl;
+            << ", Text length: " << result.text.length() << std::endl;
 
-        // send back response
-        std::cout << "[Server] Thread " << thread_id << " preparing response..." << std::endl;
-        std::cout << "[Server] Checking pointers: response=" << (task.response ? "valid" : "null")
-            << ", mutex=" << (task.response_mutex ? "valid" : "null")
-            << ", done=" << (task.done ? "valid" : "null")
-            << ", cv=" << (task.cv ? "valid" : "null") << std::endl;
+        // Store the result
+        {
+            std::lock_guard<std::mutex> lock(results_mutex_);
+            TaskResult task_result;
+            task_result.request_id = task.request_id;
+            task_result.text = result.text;
+            task_result.success = result.success;
+            task_result.error_message = result.error_msg;
+            task_result.completed = true;
 
-        if (task.response && task.response_mutex && task.done && task.cv) {
-            std::cout << "[Server] Thread " << thread_id << " acquiring lock..." << std::endl;
-            {
-                std::lock_guard<std::mutex> lock(*task.response_mutex);
-                std::cout << "[Server] Thread " << thread_id << " lock acquired, setting response fields..." << std::endl;
+            results_[task.request_id] = task_result;
 
-                task.response->set_text(result.text);
-                task.response->set_request_id(task.request.request_id());
-                task.response->set_success(result.success);
-                task.response->set_error_message(result.error_msg);
-
-                std::cout << "[Server] Thread " << thread_id << " response fields set. Text: \""
-                    << result.text.substr(0, std::min<size_t>(50, result.text.length())) << "\"" << std::endl;
-
-                *task.done = true;
-                std::cout << "[Server] Thread " << thread_id << " marked as done" << std::endl;
-            }
-
-            std::cout << "[Server] Thread " << thread_id << " notifying condition variable..." << std::endl;
-            task.cv->notify_one();
-            std::cout << "[Server] Thread " << thread_id << " notification sent!" << std::endl;
+            std::cout << "[Server] Thread " << thread_id
+                << " stored result for request ID: " << task.request_id << std::endl;
         }
-        else {
-            std::cerr << "[Server] Thread " << thread_id << " ERROR: Invalid pointers, cannot send response!" << std::endl;
-        }
+
+        // Notify that result is ready
+        results_cv_.notify_all();
     }
 
-    std::cout << "Worker thread " << thread_id << " exited." << std::endl;
+    std::cout << "[Server] Worker thread " << thread_id << " exited." << std::endl;
 }
 
 grpc::Status OCRService::ProcessImage(
@@ -133,71 +100,100 @@ grpc::Status OCRService::ProcessImage(
     const ocrservice::OCRRequest* request,
     ocrservice::OCRResponse* response) {
 
-    // DEBUG: Log incoming request
-    std::cout << "[Server] ProcessImage called. Request ID: " << request->request_id()
+    int request_id = request->request_id();
+
+    std::cout << "[Server] ProcessImage called. Request ID: " << request_id
         << ", Client: " << context->peer()
-        << ", Image size: " << request->image_data().size() << " bytes"
-        << std::endl;
+        << ", Image size: " << request->image_data().size() << " bytes" << std::endl;
 
-    // Use shared_ptr for synchronization objects
-    auto responseMutex = std::make_shared<std::mutex>();
-    auto cv = std::make_shared<std::condition_variable>();
-    auto completed = std::make_shared<bool>(false);
+    // Queue the task
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
 
-    Task task{ *request, response, responseMutex, cv, completed };
+        ImageTask task;
+        task.request_id = request_id;
+        task.image_data.assign(request->image_data().begin(), request->image_data().end());
+
+        task_queue_.push(std::move(task));
+
+        std::cout << "[Server] Task queued. Queue size: " << task_queue_.size() << std::endl;
+    }
+    queue_cv_.notify_one();
+
+    // Wait for the result
+    std::cout << "[Server] Waiting for result of request ID: " << request_id << std::endl;
 
     {
-        std::lock_guard<std::mutex> lock(queue_mutex);
-        task_queue.push(task);
-        // DEBUG: Log queue status
-        std::cout << "[Server] Task queued. Queue size: " << task_queue.size() << std::endl;
+        std::unique_lock<std::mutex> lock(results_mutex_);
+        results_cv_.wait(lock, [this, request_id]() {
+            return results_.find(request_id) != results_.end() && results_[request_id].completed;
+            });
+
+        // Get the result
+        const TaskResult& result = results_[request_id];
+
+        response->set_request_id(result.request_id);
+        response->set_text(result.text);
+        response->set_success(result.success);
+        response->set_error_message(result.error_message);
+
+        std::cout << "[Server] Response prepared for Request ID: " << request_id
+            << ", Success: " << result.success
+            << ", Text length: " << result.text.length() << std::endl;
+
+        // Clean up the result
+        results_.erase(request_id);
     }
-    queue_cv.notify_one();
 
-    // wait for completion
-    std::unique_lock<std::mutex> lock(*responseMutex);
-    cv->wait(lock, [completed] { return *completed; });
-
-    // DEBUG: Log completion
-    std::cout << "[Server] Response sent for Request ID: " << response->request_id()
-        << ", Success: " << response->success()
-        << std::endl;
+    std::cout << "[Server] Response sent for Request ID: " << request_id << std::endl;
 
     return grpc::Status::OK;
 }
 
 grpc::Status OCRService::ProcessImageStream(
     grpc::ServerContext* context,
-    grpc::ServerReaderWriter<ocrservice::OCRResponse,
-    ocrservice::OCRRequest>* stream) {
+    grpc::ServerReaderWriter<ocrservice::OCRResponse, ocrservice::OCRRequest>* stream) {
 
     ocrservice::OCRRequest request;
     std::mutex streamMutex;
 
     while (stream->Read(&request)) {
-        // create response for this request
-        auto response = std::make_shared<ocrservice::OCRResponse>();
-        auto responseMutex = std::make_shared<std::mutex>();
-        auto cv = std::make_shared<std::condition_variable>();
-        auto completed = std::make_shared<bool>(false);
+        int request_id = request.request_id();
 
-        Task task{ request, response.get(), responseMutex, cv, completed };
-
+        // Queue the task
         {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            task_queue.push(task);
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+
+            ImageTask task;
+            task.request_id = request_id;
+            task.image_data.assign(request.image_data().begin(), request.image_data().end());
+
+            task_queue_.push(std::move(task));
         }
-        queue_cv.notify_one();
+        queue_cv_.notify_one();
 
+        // Wait for the result
+        ocrservice::OCRResponse response;
+        {
+            std::unique_lock<std::mutex> lock(results_mutex_);
+            results_cv_.wait(lock, [this, request_id]() {
+                return results_.find(request_id) != results_.end() && results_[request_id].completed;
+                });
 
-        { // wait for completion 
-            std::unique_lock<std::mutex> lock(*responseMutex);
-            cv->wait(lock, [completed] { return *completed; });
+            const TaskResult& result = results_[request_id];
+
+            response.set_request_id(result.request_id);
+            response.set_text(result.text);
+            response.set_success(result.success);
+            response.set_error_message(result.error_message);
+
+            results_.erase(request_id);
         }
 
-        { // fail to write response
+        // Send response
+        {
             std::lock_guard<std::mutex> lock(streamMutex);
-            if (!stream->Write(*response)) {
+            if (!stream->Write(response)) {
                 return grpc::Status::CANCELLED;
             }
         }

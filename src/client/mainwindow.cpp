@@ -102,7 +102,9 @@ MainWindow::MainWindow(QWidget* parent)
     worker_->moveToThread(workerThread_);
 
     connect(worker_, &OCRClientWorker::resultReady,
-        this, &MainWindow::onOCRResultReady);
+        this, &MainWindow::onOCRResultReady, Qt::QueuedConnection); // Add Qt::QueuedConnection explicitly
+
+    qDebug() << "[Client] Signal-slot connection established";
     connect(workerThread_, &QThread::finished, worker_, &QObject::deleteLater);
 
     workerThread_->start();
@@ -289,35 +291,49 @@ void MainWindow::onOCRResultReady(int requestId, const QString& text, bool succe
     qDebug() << "[Client] Received result for Request ID:" << requestId
         << "Success:" << success;
 
-    QMutexLocker locker(&batchMutex_);
+    QString resultEntry;
+    QString status;
+    int taskIndex = -1;
 
-    // Find the task and update it
-    for (int i = 0; i < currentBatch_.size(); ++i) {
-        if (currentBatch_[i].requestId == requestId && !currentBatch_[i].completed) {
-            currentBatch_[i].completed = true;
-            currentBatch_[i].result = success ? text : ("Error: " + error);
-            completedCount_++;
+    // Minimize the locked section - only access shared data
+    {
+        QMutexLocker locker(&batchMutex_);
 
-            // Update thumbnail status
-            QString status = success ? "✓ Completed" : "✗ Failed";
-            updateThumbnailStatus(i, status);
+        // Find the task and update it
+        for (int i = 0; i < currentBatch_.size(); ++i) {
+            if (currentBatch_[i].requestId == requestId && !currentBatch_[i].completed) {
+                currentBatch_[i].completed = true;
+                currentBatch_[i].result = success ? text : ("Error: " + error);
+                completedCount_++;
+                taskIndex = i;
 
-            // Update results display immediately
-            QString resultEntry = QString("\n=== Image: %1 ===\n")
-                .arg(QFileInfo(currentBatch_[i].filePath).fileName());
-            if (success) {
-                resultEntry += text + "\n";
-                qDebug() << "[Client] OCR Text extracted:" << text.left(50) << "...";
+                // Prepare data while we have the lock
+                resultEntry = QString("\n=== Image: %1 ===\n")
+                    .arg(QFileInfo(currentBatch_[i].filePath).fileName());
+                if (success) {
+                    resultEntry += text + "\n";
+                    qDebug() << "[Client] OCR Text extracted:" << text.left(50) << "...";
+                }
+                else {
+                    resultEntry += "ERROR: " + error + "\n";
+                    qDebug() << "[Client] OCR Error:" << error;
+                }
+
+                status = success ? "✓ Completed" : "✗ Failed";
+                break;
             }
-            else {
-                resultEntry += "ERROR: " + error + "\n";
-                qDebug() << "[Client] OCR Error:" << error;
-            }
-
-            resultsDisplay->append(resultEntry);
-
-            break;
         }
+    } // Lock is released here
+
+    // Now do UI updates outside the lock
+    if (taskIndex != -1) {
+        updateThumbnailStatus(taskIndex, status);
+        resultsDisplay->append(resultEntry);
+
+        // Scroll to bottom of results
+        QTextCursor cursor = resultsDisplay->textCursor();
+        cursor.movePosition(QTextCursor::End);
+        resultsDisplay->setTextCursor(cursor);
     }
 
     // Update progress

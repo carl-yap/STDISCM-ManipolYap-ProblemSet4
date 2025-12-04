@@ -4,45 +4,53 @@
 #include "ocr_processor.h"
 #include <grpcpp/grpcpp.h>
 #include <memory>
-
 #include <vector>
 #include <thread>
 #include <queue>
+#include <map>
 #include <condition_variable>
 #include <mutex>
 
 class OCRService final : public ocrservice::OCRService::Service {
 public:
-	OCRService(int n_threads = 4);
-	~OCRService();
+    OCRService(int n_threads = 4);
+    ~OCRService();
 
-	grpc::Status ProcessImage(
-		grpc::ServerContext* context,
-		const ocrservice::OCRRequest* request,
-		ocrservice::OCRResponse* response) override;
+    grpc::Status ProcessImage(
+        grpc::ServerContext* context,
+        const ocrservice::OCRRequest* request,
+        ocrservice::OCRResponse* response) override;
 
-	grpc::Status ProcessImageStream(
-		grpc::ServerContext* context,
-		grpc::ServerReaderWriter<ocrservice::OCRResponse,
-		ocrservice::OCRRequest>* stream) override;
+    grpc::Status ProcessImageStream(
+        grpc::ServerContext* context,
+        grpc::ServerReaderWriter<ocrservice::OCRResponse,
+        ocrservice::OCRRequest>* stream) override;
 
 private:
-	struct Task {
-		ocrservice::OCRRequest request;
-		ocrservice::OCRResponse* response;
-		std::shared_ptr<std::mutex> response_mutex;  // Changed to shared_ptr
-		std::shared_ptr<std::condition_variable> cv;  // Changed to shared_ptr
-		std::shared_ptr<bool> done;  // Changed to shared_ptr
-	};
+    struct ImageTask {
+        int request_id;
+        std::vector<unsigned char> image_data;
+    };
 
-	void workerThread();
-	void processTask(const Task& task);
+    struct TaskResult {
+        int request_id;
+        std::string text;
+        bool success;
+        std::string error_message;
+        bool completed = false;
+    };
 
-	std::vector<std::thread> workers;
-	std::queue<Task> task_queue;
-	std::mutex queue_mutex;
-	std::condition_variable queue_cv;
-	bool shutdown;
+    void workerThread(int thread_id);
 
-	std::vector<std::unique_ptr<OCRProcessor>> processors;
+    std::vector<std::thread> workers_;
+    std::queue<ImageTask> task_queue_;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+
+    std::map<int, TaskResult> results_;
+    std::mutex results_mutex_;
+    std::condition_variable results_cv_;
+
+    bool shutdown_;
+    std::vector<std::unique_ptr<OCRProcessor>> processors_;
 };
