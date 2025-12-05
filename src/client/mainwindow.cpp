@@ -11,7 +11,7 @@
 
 // OCRClientWorker implementation
 OCRClientWorker::OCRClientWorker(std::shared_ptr<grpc::Channel> channel)
-    : stub_(ocrservice::OCRService::NewStub(channel)), shutdown_(false)
+    : stub_(ocrservice::OCRService::NewStub(channel)), shutdown_(false), deadlineEnabled_(false)
 {
 }
 
@@ -24,7 +24,8 @@ void OCRClientWorker::processImage(int requestId, const QImage& image, const QSt
 
     qDebug() << "[Client] Processing image. Request ID:" << requestId
         << "File:" << filePath
-        << "Image size:" << image.size();
+        << "Image size:" << image.size()
+        << "Deadline enabled:" << deadlineEnabled_.load();
 
     try {
         // Convert QImage to byte array
@@ -41,17 +42,24 @@ void OCRClientWorker::processImage(int requestId, const QImage& image, const QSt
 
         qDebug() << "[Client] Image converted to PNG. Size:" << imageBytes.size() << "bytes";
 
-        // Prepare gRPC request - request_id is int32
+        // Prepare gRPC request
         ocrservice::OCRRequest request;
         request.set_image_data(imageBytes.constData(), imageBytes.size());
-        request.set_request_id(requestId);  // This is correct - int32
+        request.set_request_id(requestId);
 
-        // DEBUG: Log before sending
         qDebug() << "[Client] Sending gRPC request. Request ID:" << request.request_id()
             << "Image data size:" << request.image_data().size() << "bytes";
 
-        // Send request
+        // Send request with optional deadline
         grpc::ClientContext context;
+
+        // Set a deadline
+        if (deadlineEnabled_) {
+            auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(500);
+            context.set_deadline(deadline);
+            qDebug() << "[Client] Deadline set to 500ms for request" << requestId;
+        }
+
         ocrservice::OCRResponse response;
 
         auto start_time = std::chrono::high_resolution_clock::now();
@@ -60,12 +68,11 @@ void OCRClientWorker::processImage(int requestId, const QImage& image, const QSt
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
         qDebug() << "[Client] Received response in" << duration.count() << "ms";
-        qDebug() << "[Client] Response request_id:" << response.request_id();
-        qDebug() << "[Client] Response success:" << response.success();
-        qDebug() << "[Client] Response text length:" << response.text().length();
-        qDebug() << "[Client] Response error:" << QString::fromStdString(response.error_message());
 
         if (status.ok()) {
+            qDebug() << "[Client] Response request_id:" << response.request_id();
+            qDebug() << "[Client] Response success:" << response.success();
+            qDebug() << "[Client] Response text length:" << response.text().length();
             qDebug() << "[Client] Request" << requestId << "successful. "
                 << "Text length:" << response.text().length()
                 << "Success:" << response.success();
@@ -76,10 +83,17 @@ void OCRClientWorker::processImage(int requestId, const QImage& image, const QSt
                 QString::fromStdString(response.error_message()));
         }
         else {
-            qDebug() << "[Client] gRPC error for request" << requestId
-                << ":" << QString::fromStdString(status.error_message());
-            emit resultReady(requestId, "", false,
-                QString("gRPC error: %1").arg(status.error_message().c_str()));
+            // Check if it's a deadline exceeded error
+            if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                qDebug() << "[Client] Deadline exceeded for request" << requestId;
+                emit resultReady(requestId, "", false, "Deadline");
+            }
+            else {
+                qDebug() << "[Client] gRPC error for request" << requestId
+                    << ":" << QString::fromStdString(status.error_message());
+                emit resultReady(requestId, "", false,
+                    QString("gRPC error: %1").arg(status.error_message().c_str()));
+            }
         }
     }
     catch (const std::exception& e) {
@@ -90,10 +104,10 @@ void OCRClientWorker::processImage(int requestId, const QImage& image, const QSt
 
 // MainWindow implementation
 MainWindow::MainWindow(QWidget* parent)
-    : QMainWindow(parent), completedCount_(0), nextRequestId_(1), totalInCurrentBatch_(0)
+    : QMainWindow(parent), completedCount_(0), nextRequestId_(1), totalInCurrentBatch_(0), deadlineEnabled_(false)
 {
     // Setup gRPC channel
-    channel_ = grpc::CreateChannel("localhost:50051", grpc::InsecureChannelCredentials());
+    channel_ = grpc::CreateChannel("10.98.53.240:50051", grpc::InsecureChannelCredentials());
     stub_ = ocrservice::OCRService::NewStub(channel_);
 
     // Setup worker thread
@@ -102,7 +116,7 @@ MainWindow::MainWindow(QWidget* parent)
     worker_->moveToThread(workerThread_);
 
     connect(worker_, &OCRClientWorker::resultReady,
-        this, &MainWindow::onOCRResultReady, Qt::QueuedConnection); // Add Qt::QueuedConnection explicitly
+        this, &MainWindow::onOCRResultReady, Qt::QueuedConnection);
 
     qDebug() << "[Client] Signal-slot connection established";
     connect(workerThread_, &QThread::finished, worker_, &QObject::deleteLater);
@@ -124,9 +138,23 @@ void MainWindow::setupUI()
 
     mainLayout = new QVBoxLayout(centralWidget);
 
+    // Create button row
+    QHBoxLayout* buttonLayout = new QHBoxLayout();
+
     // Create UI elements
     uploadButton = new QPushButton("Upload Images", this);
     clearButton = new QPushButton("Clear Results", this);
+    deadlineButton = new QPushButton("Deadline: OFF", this);
+    deadlineButton->setCheckable(true);
+    deadlineButton->setStyleSheet(
+        "QPushButton { background-color: #4CAF50; color: white; padding: 5px; }"
+        "QPushButton:checked { background-color: #f44336; }"
+    );
+
+    buttonLayout->addWidget(uploadButton);
+    buttonLayout->addWidget(clearButton);
+    buttonLayout->addWidget(deadlineButton);
+
     progressBar = new QProgressBar(this);
     resultsDisplay = new QTextEdit(this);
     statusLabel = new QLabel("Ready to upload images", this);
@@ -146,8 +174,7 @@ void MainWindow::setupUI()
 
     // Add to layout
     mainLayout->addWidget(statusLabel);
-    mainLayout->addWidget(uploadButton);
-    mainLayout->addWidget(clearButton);
+    mainLayout->addLayout(buttonLayout);
     mainLayout->addWidget(progressBar);
     mainLayout->addWidget(new QLabel("Processing Queue:", this));
     mainLayout->addWidget(fileListWidget);
@@ -157,9 +184,27 @@ void MainWindow::setupUI()
     // Connect signals
     connect(uploadButton, &QPushButton::clicked, this, &MainWindow::onUploadClicked);
     connect(clearButton, &QPushButton::clicked, this, &MainWindow::onClearClicked);
+    connect(deadlineButton, &QPushButton::clicked, this, &MainWindow::onDeadlineToggled);
 
     setWindowTitle("Distributed OCR Client");
     resize(800, 600);
+}
+
+void MainWindow::onDeadlineToggled()
+{
+    deadlineEnabled_ = deadlineButton->isChecked();
+
+    if (deadlineEnabled_) {
+        deadlineButton->setText("Deadline: ON");
+        statusLabel->setText("Deadline mode enabled (100ms timeout)");
+    }
+    else {
+        deadlineButton->setText("Deadline: OFF");
+        statusLabel->setText("Ready to upload images");
+    }
+
+    worker_->setDeadlineEnabled(deadlineEnabled_);
+    qDebug() << "[Client] Deadline mode:" << (deadlineEnabled_ ? "ENABLED" : "DISABLED");
 }
 
 QWidget* MainWindow::createThumbnailWidget(const QImage& image, const QString& fileName, const QString& status)
@@ -266,7 +311,8 @@ void MainWindow::onUploadClicked()
             }
         }
 
-        statusLabel->setText(QString("Processing %1 images in current batch").arg(totalInCurrentBatch_));
+        QString deadlineStatus = deadlineEnabled_ ? " (Deadline mode ON)" : "";
+        statusLabel->setText(QString("Processing %1 images in current batch%2").arg(totalInCurrentBatch_).arg(deadlineStatus));
         progressBar->setValue(0);
 
         qDebug() << "[Client] Current batch size:" << totalInCurrentBatch_;
@@ -278,7 +324,9 @@ void MainWindow::onClearClicked()
     resultsDisplay->clear();
     fileListWidget->clear();
     progressBar->setValue(0);
-    statusLabel->setText("Results cleared");
+
+    QString deadlineStatus = deadlineEnabled_ ? " (Deadline mode ON)" : "";
+    statusLabel->setText(QString("Results cleared%1").arg(deadlineStatus));
 
     QMutexLocker locker(&batchMutex_);
     currentBatch_.clear();
@@ -289,7 +337,8 @@ void MainWindow::onClearClicked()
 void MainWindow::onOCRResultReady(int requestId, const QString& text, bool success, const QString& error)
 {
     qDebug() << "[Client] Received result for Request ID:" << requestId
-        << "Success:" << success;
+        << "Success:" << success
+        << "Error:" << error;
 
     QString resultEntry;
     QString status;
@@ -310,16 +359,25 @@ void MainWindow::onOCRResultReady(int requestId, const QString& text, bool succe
                 // Prepare data while we have the lock
                 resultEntry = QString("\n=== Image: %1 ===\n")
                     .arg(QFileInfo(currentBatch_[i].filePath).fileName());
+
                 if (success) {
                     resultEntry += text + "\n";
                     qDebug() << "[Client] OCR Text extracted:" << text.left(50) << "...";
+                    status = "✓ Completed";
                 }
                 else {
-                    resultEntry += "ERROR: " + error + "\n";
-                    qDebug() << "[Client] OCR Error:" << error;
+                    // Check if it's a deadline error
+                    if (error == "Deadline") {
+                        resultEntry += "[Error: Deadline]\n";
+                        qDebug() << "[Client] Deadline exceeded";
+                        status = "⏱ Deadline";
+                    }
+                    else {
+                        resultEntry += "ERROR: " + error + "\n";
+                        qDebug() << "[Client] OCR Error:" << error;
+                        status = "✗ Failed";
+                    }
                 }
-
-                status = success ? "✓ Completed" : "✗ Failed";
                 break;
             }
         }
@@ -346,11 +404,13 @@ void MainWindow::onProgressUpdated()
         int progress = (completedCount_ * 100) / totalInCurrentBatch_;
         progressBar->setValue(progress);
 
+        QString deadlineStatus = deadlineEnabled_ ? " (Deadline mode ON)" : "";
         statusLabel->setText(
-            QString("Processed %1/%2 images (%3%)")
+            QString("Processed %1/%2 images (%3%%)%4")
             .arg(completedCount_.load())
             .arg(totalInCurrentBatch_)
-            .arg(progress));
+            .arg(progress)
+            .arg(deadlineStatus));
 
         // Scroll to bottom of results
         QTextCursor cursor = resultsDisplay->textCursor();

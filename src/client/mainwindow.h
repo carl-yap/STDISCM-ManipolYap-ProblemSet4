@@ -30,6 +30,7 @@ public:
 private slots:
     void onUploadClicked();
     void onClearClicked();
+    void onDeadlineToggled();
     void onOCRResultReady(int requestId, const QString& text, bool success, const QString& error);
     void onProgressUpdated();
 
@@ -52,6 +53,7 @@ private:
     QVBoxLayout* mainLayout;
     QPushButton* uploadButton;
     QPushButton* clearButton;
+    QPushButton* deadlineButton;
     QProgressBar* progressBar;
     QTextEdit* resultsDisplay;
     QLabel* statusLabel;
@@ -64,6 +66,7 @@ private:
     std::atomic<int> completedCount_;
     std::atomic<int> nextRequestId_;
     int totalInCurrentBatch_;
+    bool deadlineEnabled_;
 
     QMutex batchMutex_;
     QThread* workerThread_;
@@ -78,6 +81,8 @@ public:
     OCRClientWorker(std::shared_ptr<grpc::Channel> channel);
     ~OCRClientWorker();
 
+    void setDeadlineEnabled(bool enabled) { deadlineEnabled_ = enabled; }
+
 public slots:
     void processImage(int requestId, const QImage& image, const QString& filePath);
 
@@ -87,6 +92,7 @@ signals:
 private:
     std::unique_ptr<ocrservice::OCRService::Stub> stub_;
     std::atomic<bool> shutdown_;
+    std::atomic<bool> deadlineEnabled_;
 };
 
 #endif // MAINWINDOW_H
