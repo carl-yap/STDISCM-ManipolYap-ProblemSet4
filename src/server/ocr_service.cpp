@@ -33,6 +33,9 @@ OCRService::~OCRService() {
 }
 
 void OCRService::workerThread(int thread_id) {
+    constexpr int kMaxRetries = 3;
+    constexpr int kRetryDelayMs = 200;
+
     std::cout << "[Server] Worker thread " << thread_id << " started." << std::endl;
 
     while (true) {
@@ -58,28 +61,48 @@ void OCRService::workerThread(int thread_id) {
             }
         }
 
-        // Process the image
+        TaskResult task_result;
+        bool success = false;
+        std::string error_message;
+        std::string text;
+        int attempt = 0;
         auto start_time = std::chrono::high_resolution_clock::now();
 
-        std::cout << "[Server] Thread " << thread_id << " processing image..." << std::endl;
-        auto result = processors_[thread_id]->processImage(task.image_data);
+        while (attempt < kMaxRetries) {
+            std::cout << "[Server] Thread " << thread_id << " processing image (attempt " << (attempt + 1) << ")..." << std::endl;
+            auto result = processors_[thread_id]->processImage(task.image_data);
+
+            if (result.success) {
+                success = true;
+                text = result.text;
+                error_message = result.error_msg;
+                break;
+            }
+            else {
+                error_message = result.error_msg;
+                std::cout << "[Server] Thread " << thread_id << " processing failed: " << error_message << std::endl;
+                if (attempt < kMaxRetries - 1) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kRetryDelayMs));
+                }
+            }
+            ++attempt;
+        }
 
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
         std::cout << "[Server] Thread " << thread_id
             << " completed in " << duration.count() << "ms. "
-            << "Success: " << (result.success ? "Yes" : "No")
-            << ", Text length: " << result.text.length() << std::endl;
+            << "Success: " << (success ? "Yes" : "No")
+            << ", Text length: " << text.length() << std::endl;
 
         // Store the result
         {
             std::lock_guard<std::mutex> lock(results_mutex_);
-            TaskResult task_result;
             task_result.request_id = task.request_id;
-            task_result.text = result.text;
-            task_result.success = result.success;
-            task_result.error_message = result.error_msg;
+            task_result.text = text;
+            task_result.success = success;
+            task_result.error_message = error_message;
             task_result.completed = true;
 
             results_[task.request_id] = task_result;
@@ -146,58 +169,6 @@ grpc::Status OCRService::ProcessImage(
     }
 
     std::cout << "[Server] Response sent for Request ID: " << request_id << std::endl;
-
-    return grpc::Status::OK;
-}
-
-grpc::Status OCRService::ProcessImageStream(
-    grpc::ServerContext* context,
-    grpc::ServerReaderWriter<ocrservice::OCRResponse, ocrservice::OCRRequest>* stream) {
-
-    ocrservice::OCRRequest request;
-    std::mutex streamMutex;
-
-    while (stream->Read(&request)) {
-        int request_id = request.request_id();
-
-        // Queue the task
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex_);
-
-            ImageTask task;
-            task.request_id = request_id;
-            task.image_data.assign(request.image_data().begin(), request.image_data().end());
-
-            task_queue_.push(std::move(task));
-        }
-        queue_cv_.notify_one();
-
-        // Wait for the result
-        ocrservice::OCRResponse response;
-        {
-            std::unique_lock<std::mutex> lock(results_mutex_);
-            results_cv_.wait(lock, [this, request_id]() {
-                return results_.find(request_id) != results_.end() && results_[request_id].completed;
-                });
-
-            const TaskResult& result = results_[request_id];
-
-            response.set_request_id(result.request_id);
-            response.set_text(result.text);
-            response.set_success(result.success);
-            response.set_error_message(result.error_message);
-
-            results_.erase(request_id);
-        }
-
-        // Send response
-        {
-            std::lock_guard<std::mutex> lock(streamMutex);
-            if (!stream->Write(response)) {
-                return grpc::Status::CANCELLED;
-            }
-        }
-    }
 
     return grpc::Status::OK;
 }
